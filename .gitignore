@@ -1,0 +1,6 @@
+checkpoints
+*.pth
+*.pickle
+*.json
+*.log
+__pycache__
