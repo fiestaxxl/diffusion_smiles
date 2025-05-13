@@ -9,7 +9,7 @@ import numpy as np
 import functools
 from torch.optim import AdamW
 
-
+import regex
 from abc import ABC, abstractmethod
 
 import logging
@@ -17,6 +17,8 @@ import logging
 from utils import decode, process_decode
 from validate import validity
 
+import random
+import wandb
 
 # Create a separate logger for tools.py
 logger = logging.getLogger("train_logger")
@@ -34,6 +36,12 @@ file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
 
+def getrandomnumber(numbers,k,weights=None):
+    if k==1:
+        return random.choices(numbers,weights=weights,k=k)[0]
+    else:
+        return random.choices(numbers,weights=weights,k=k)
+
 class SMILESDataset(Dataset):
     def __init__(self, smiles_list, tokenizer, max_len, vocab, corrupt=False, corrupt_ratio=0.1):
         self.smiles_list = smiles_list
@@ -42,64 +50,130 @@ class SMILESDataset(Dataset):
         self.stoi = vocab
         self.corrupt = corrupt
         self.corrupt_ratio = corrupt_ratio
+        pattern =  "(\[[^\]]+]|Br?|Cl?|N|O|S|P|F|I|b|c|n|o|s|p|\(|\)|\.|=|#|-|\+|\\\\|\/|:|~|@|\?|>|\*|\$|\%[0-9]{2}|[0-9])"
+        self.rg = regex.compile(pattern)
 
     def __len__(self):
         return len(self.smiles_list)
 
     def __getitem__(self, idx):
-        pure_tokens = self.encode(self.smiles_list[idx], self.stoi)
+        smi = self.smiles_list[idx]
+        pure_tokens = self.encode(smi, self.stoi)
 
         tokens_with_symbols = [self.stoi['<sos>']] + pure_tokens + [self.stoi['<eos>']]
         pad_len = self.max_len - len(tokens_with_symbols)
-        tokens_with_symbols = tokens_with_symbols + [self.stoi['<pad>']] * pad_len # Padding
+        tokens_with_symbols = tokens_with_symbols + [self.stoi['<pad>']] * pad_len
 
         if self.corrupt:
-            corrupt_tokens = np.array([self.stoi[str(i)] for i in range(1, 10)] + [self.stoi['('], self.stoi[')']])
-            tokens = list(self.corrupt_tokens(pure_tokens, corrupt_tokens, self.corrupt_ratio))
-            assert len(tokens) == len(pure_tokens), f"{len(tokens)}, {len(pure_tokens)}"
-
-            corrupted_tokens_with_symbols = [self.stoi['<sos>']] + tokens + [self.stoi['<eos>']]
-            corrupted_tokens_with_symbols = corrupted_tokens_with_symbols + [self.stoi['<pad>']] * pad_len # Padding
-            corrupted_tokens_with_symbols = torch.tensor(corrupted_tokens_with_symbols, dtype=torch.long)
+            corrupted_tokens_with_symbols = self.corrupt_one(smi).squeeze(0)
         else:
-            corrupted_tokens_with_symbols = torch.tensor([0 for _ in range(len(tokens_with_symbols))])
-        assert len(tokens_with_symbols) == len(corrupted_tokens_with_symbols), f'{len(tokens_with_symbols)}, {len(corrupted_tokens_with_symbols)}'
-        return torch.tensor(tokens_with_symbols, dtype=torch.long), pad_len, corrupted_tokens_with_symbols
+            corrupted_tokens_with_symbols = torch.tensor([0] * len(tokens_with_symbols), dtype=torch.long)
 
-    def corrupt_tokens(self, token_ids, corrupt_values, max_corruption_ratio=0.1):
-        """
-        Corrupts a sequence of token IDs by randomly inserting tokens from {1-9, 78, 79}.
-        Ensures at least one corruption but no more than 10% of the total tokens.
-        
-        Args:
-            token_ids (np.ndarray): 1D array of token IDs.
-            corrupt_values (list | np.ndarray): 1D array of corrupt tokens IDs
-            max_corruption_ratio (float): Max fraction of tokens to corrupt (default 10%).
-        
-        Returns:
-            np.ndarray: Corrupted token sequence.
-        """
-        token_ids = np.array(token_ids)  # Ensure it's a NumPy array
-        seq_len = len(token_ids)
+        assert len(tokens_with_symbols) == len(corrupted_tokens_with_symbols), \
+            f'{len(tokens_with_symbols)}, {len(corrupted_tokens_with_symbols)}'
 
-        # Determine the number of corruptions (at least 1, at most 10% of seq_len)
-        num_corruptions = int(max(1, min(int(seq_len * max_corruption_ratio), seq_len)))  # Ensure at least 1 corruption
+        labels = self.label_tokens(tokens_with_symbols)
+        return torch.tensor(tokens_with_symbols, dtype=torch.long), torch.tensor(labels, dtype=torch.long), corrupted_tokens_with_symbols
 
-        # Select `num_corruptions` unique positions to corrupt
-        corruption_indices = np.random.choice(seq_len, num_corruptions, replace=False)
+    def corrupt_one(self, smi):
+        # res = [self.toktoid[i] for i in self.rg.findall(smi)]
+        res = [i for i in self.rg.findall(smi)]
+        total_length = len(res) + 2
+        if total_length>self.max_len:
+            encoded = self.encode(smi)
+            return [self.stoi['<sos>']] + encoded + [self.stoi['<eos>']]
+        ######################## start corruption ###########################
+        r = random.random()
+        if r<0.3:
+            pa,ring = True,True
+        elif r<0.65:
+            pa,ring = True,False
+        else:
+            pa,ring = False,True
+        #########################
+        max_ring_num  = 1
+        ringpos = []
+        papos = []
+        for pos,at in enumerate(res):
+            if at=='(' or at==')':
+                papos.append(pos)
+            elif at.isnumeric():
+                max_ring_num = max(max_ring_num,int(at))
+                ringpos.append(pos)
+        # ( & ) remove
+        r = random.random()
+        if r<0.3:
+            remove,padd = True,True
+        elif r<0.65:
+            remove,padd = True,False
+        else:
+            remove,padd = False,True
+        if pa and len(papos)>0:
+            if remove:
+                # remove pa
+                n_remove = getrandomnumber([1,2,3,4],1,weights = [0.6,0.2,0.1,0.1])
+                p_remove = set(random.choices(papos,weights=None,k=n_remove))
+                total_length -= len(p_remove)
+                for p in p_remove:
+                    res[p]=None
+                    # print('debug pa delete {}'.format(p))
+        # Ring remove
+        r = random.random()
+        if r<0.3:
+            remove,radd = True,True
+        elif r<0.65:
+            remove,radd = True,False
+        else:
+            remove,radd = False,True
+        if ring and len(ringpos)>0:
+            if remove:
+                # remove ring
+                n_remove = getrandomnumber([1,2,3,4],1,weights = [0.7,0.2,0.05,0.05])
+                p_remove = set(random.choices(ringpos,weights=None,k=n_remove))
+                total_length -= len(p_remove)
+                for p in p_remove:
+                    res[p]=None
+                    # print('debug ring delete {}'.format(p))
+        # ring add & ( ) add
+        if pa:
+            if padd:
+                n_add = getrandomnumber([1,2,3],1,weights = [0.8,0.2,0.1])
+                n_add = min(self.max_len-total_length,n_add)
+                for _ in range(n_add):
+                    sele = random.randrange(len(res)+1)
+                    res.insert(sele, '(' if random.random()<0.5 else ')')
+                    # print('debug pa add {}'.format(sele))
+                    total_length += 1
+        if ring:
+            if radd:
+                n_add = getrandomnumber([1,2,3],1,weights = [0.8,0.2,0.1])
+                n_add = min(self.max_len-total_length,n_add)
+                for _ in range(n_add):
+                    sele = random.randrange(len(res)+1)
+                    res.insert(sele, str(random.randrange(1,max_ring_num+1)))
+                    # print('debug ring add {}'.format(sele))
+                    total_length += 1
 
-        # Possible corruption values
-        corrupt_values = np.array(corrupt_values)
+        ########################## end corruption ###############################
+        # print('test:',res)
+        # print('test:',''.join([i for i in res if i is not None]))
 
-        # Generate random corrupt tokens
-        random_tokens = np.random.choice(corrupt_values, num_corruptions)
+        res = [self.stoi[i] for i in res if i is not None]
+        res = [self.stoi['<sos>']] + res + [self.stoi['<eos>']]
+        if len(res) < self.max_len:
+            res += [self.stoi['<pad>']]*(self.max_len-len(res))
+        else:
+            res = res[:self.max_len]
+            res[-1] = [self.stoi['<eos>']]
+        return torch.LongTensor([res])
 
-        # Create a corrupted copy
-        corrupted_token_ids = token_ids.copy()
-        corrupted_token_ids[corruption_indices] = random_tokens
-        assert len(corrupted_token_ids) == len(token_ids)
-        return corrupted_token_ids
-
+    def label_tokens(self, token_ids):
+        label_classes = {
+            '(': 0,
+            ')': 1
+        }
+        labels = [label_classes.get(token, 2) for token in token_ids]
+        return labels
     
 class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
 
@@ -212,7 +286,6 @@ class TrainLoop:
         weight_decay=0.0,
         gradient_clipping=1.,
         warmup = 1000, 
-        finetune = False,
         tau = 400,
         device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'),
         opt_params = None,
@@ -228,7 +301,6 @@ class TrainLoop:
         self.weight_decay = weight_decay
         self.gradient_clipping = gradient_clipping
         self.max_iters = max_iters
-        self.finetune = finetune
         self.tau = tau
 
         self.step = 0
@@ -255,44 +327,54 @@ class TrainLoop:
         for epoch in range(num_epochs):
             progress_bar = tqdm(self.dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
             for batch in progress_bar:
-                if self.step % 1000 == 0 and self.step!=0:
+                if self.step % 1500 == 0 and self.step!=0:
                     generated_smiles = []
-                    with torch.no_grad():
-                        for i in range(10):
-                            generated_embeddings = [self.model.get_logits(x["sample"]).softmax(dim=-1).argmax(dim=-1).cpu() for x in self.diffusion.p_sample_loop_progressive(self.model, (30, 109, self.model.emb_dim))]
-                            smiles = [[decode(process_decode(x.cpu().tolist(), [self.diffusion.vocab['<sos>'],self.diffusion.vocab['<eos>'],self.diffusion.vocab['<pad>']]), self.diffusion.reverse_vocab) for x in y] for y in generated_embeddings[-2:]]
-                            generated_smiles.extend(smiles[-1])
+                    for i in range(10):
+                        generated_embeddings = []
+                        self.model.eval()
+
+                        for x in self.diffusion.p_sample_loop_progressive(self.model, (30, 109, self.model.emb_dim), time_steps=1000):
+                            with torch.no_grad():
+                                generated_embeddings.append(self.model.get_logits(x["sample"]).softmax(dim=-1).argmax(dim=-1).cpu())
+                        smiles = [[decode(process_decode(x.cpu().tolist(), [self.diffusion.vocab['<sos>'],self.diffusion.vocab['<eos>'],self.diffusion.vocab['<pad>']]), self.diffusion.reverse_vocab) for x in y] for y in generated_embeddings[-2:]]
+                        generated_smiles.extend(smiles[-1])
                         
                         valids = round(sum(validity(generated_smiles))/len(generated_smiles)*100, 2)
                     logger.info(f"step {self.step}/{self.max_iters} noise_loss: {round(self.loss,6)}, validity: {valids}, lr: {self.scheduler.get_last_lr()[0]}")
+                    wandb.log({'validity':valids})
+                    self.model.train()
 
-                if self.step % 400 == 0 and self.step != 0:
+                if self.step % 20 == 0:
                     logger.info(f"step {self.step}/{self.max_iters} noise_loss: {round(self.loss,6)}, lr: {self.scheduler.get_last_lr()[0]}")
-                             
-                if self.finetune:
-                    self.run_step(batch[0], batch[-1])
-                else:
-                    self.run_step(batch[0])
+                    wandb.log({'loss':round(self.loss,6), 'lr': self.scheduler.get_last_lr()[0]})
+
+                self.run_step(  input_ids = batch[0], 
+                                token_labels = batch[1],
+                                corrupted_input_ids = batch[-1])
 
                 progress_bar.set_postfix(loss=self.loss, lr=float(self.scheduler.get_last_lr()[0]))
                 self.step += 1
+
+                if self.step%10000 == 0 and self.step!=0:
+                    checkpoint = { 
+                        'epoch': epoch,
+                        'model': self.ddp_model.state_dict(),
+                        'optimizer': self.opt.state_dict()}
+                    torch.save(checkpoint, f'checkpoints/checkpoint_{self.step}.pth')
             epoch += 1
 
         checkpoint = { 
             'epoch': epoch,
             'model': self.ddp_model.state_dict(),
             'optimizer': self.opt.state_dict()}
-        if path_to_checkpt is None:
-            torch.save(checkpoint, 'checkpoint_new.pth')
-        else:
-            torch.save(checkpoint, path_to_checkpt) 
+        torch.save(checkpoint, f'checkpoints/checkpoint_last.pth')
 
-    def run_step(self, input_ids, corrupted_input_ids = None):
-        self.forward_backward(input_ids, corrupted_input_ids)
+    def run_step(self, input_ids, token_labels = None, corrupted_input_ids = None):
+        self.forward_backward(input_ids, token_labels, corrupted_input_ids)
         self.optimize_normal()
 
 
-    def forward_backward(self, input_ids, corrupted_input_ids=None):
+    def forward_backward(self, input_ids, token_labels = None, corrupted_input_ids=None):
 
         self.opt.zero_grad()
         t, weights = self.schedule_sampler.sample(input_ids.shape[0], self.device)
@@ -303,11 +385,11 @@ class TrainLoop:
             self.ddp_model,
             t,
             input_ids,
+            token_labels,
             corrupted_input_ids,
-            self.tau
         )
 
-        losses = compute_losses(boost_factor=max_boost*(self.step/self.max_iters))
+        losses = compute_losses()
 
         if isinstance(self.schedule_sampler, LossAwareSampler):
             self.schedule_sampler.update_with_all_losses(

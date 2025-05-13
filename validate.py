@@ -119,7 +119,7 @@ def evaluate_model_quality(reference_smiles_list, generated_smiles_list):
 
 if __name__=='__main__':
     import pickle
-    with open('../transformer_decoder/smiles.pickle', 'rb') as f:
+    with open('data/smiles.pickle', 'rb') as f:
         smiles = np.array(pickle.load(f))
 
     with open('smiles_generated.pickle', 'rb') as f:

@@ -32,7 +32,7 @@ class GaussianDiffusion():
             raise NotImplementedError()
         
         # define alphas
-        self.alphas = 1. - self.betas
+        self.alphas = 1.0 - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, axis=0)
         self.alphas_cumprod_prev = F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0)
         self.alphas_cumprod_next = F.pad(self.alphas_cumprod[1:], (0, 1), value=0.0)
@@ -40,13 +40,13 @@ class GaussianDiffusion():
 
         # calculations for diffusion q(x_t | x_{t-1}) and others
         self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
-        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - self.alphas_cumprod)
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - self.alphas_cumprod)
         self.log_one_minus_alphas_cumprod = torch.log(1.0 - self.alphas_cumprod)
         self.sqrt_recip_alphas_cumprod = torch.sqrt(1.0 / self.alphas_cumprod)
         self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / self.alphas_cumprod - 1)
 
         # calculations for posterior q(x_{t-1} | x_t, x_0)
-        self.posterior_variance = self.betas * (1. - self.alphas_cumprod_prev) / (1. - self.alphas_cumprod)
+        self.posterior_variance = self.betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
 
         # log calculation clipped because the posterior variance is 0 at the
         # beginning of the diffusion chain.
@@ -252,8 +252,8 @@ class GaussianDiffusion():
             "pred_xstart": pred_xstart,
         }
     
-    @torch.no_grad()
-    def p_sample(self, model, x, t, clip_denoised=True, denoised_fn=None, model_kwargs=None,
+    #@torch.no_grad()
+    def p_sample(self, model, x, t, timesteps, clip_denoised=True, denoised_fn=None, model_kwargs=None,
             top_p=None, mask=None, x_start=None,):
         """
         Sample x_{t-1} from the model at the given timestep.
@@ -271,6 +271,12 @@ class GaussianDiffusion():
                  - 'sample': a random sample from the model.
                  - 'pred_xstart': a prediction of x_0.
         """
+
+        imbalance_loss = self.bracket_imbalance_loss(x, model.get_logits)
+        # --- BACKPROP to get gradient w.r.t. x ---
+        imbalance_loss.backward()
+        grad = x.grad
+
         out = self.p_mean_variance(
             model,
             x,
@@ -279,22 +285,17 @@ class GaussianDiffusion():
             denoised_fn=denoised_fn,
             model_kwargs=model_kwargs,
         )
-        if top_p is not None and top_p > 0:
-            # print('top_p sampling')
-            noise = torch.randn_like(x)
-            replace_mask = torch.abs(noise) > top_p
-            while replace_mask.any():
-                noise[replace_mask] = torch.randn_like(noise[replace_mask])
-                replace_mask = torch.abs(noise) > top_p
-            assert (torch.abs(noise) <= top_p).all()
 
-        else:
-            noise = torch.randn_like(x)
+        noise = torch.randn_like(x)
 
         nonzero_mask = (
             (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
         )  # no noise when t == 0
-        sample = out["mean"] + nonzero_mask * torch.exp(0.5 * out["log_variance"]) * noise
+
+        l = 1.0
+        l = l * (1 - (timesteps-t[0].item()) / timesteps)
+
+        sample = out["mean"] + nonzero_mask * torch.exp(0.5 * out["log_variance"]) * noise - l * grad
         if mask == None:
             pass
         else:
@@ -307,7 +308,7 @@ class GaussianDiffusion():
             "out": out
         }
     
-    @torch.no_grad()
+    #@torch.no_grad()
     def p_sample_loop_progressive(
         self,
         model,
@@ -351,21 +352,24 @@ class GaussianDiffusion():
 
         for i in indices: # from T to 0
             t = torch.tensor([i] * shape[0], device=device).long()
+            sample_x = sample_x.detach().requires_grad_(True)
             out = self.p_sample(
                 model,
                 sample_x,
                 t,
+                timesteps = time_steps,
                 clip_denoised=clip_denoised,
                 denoised_fn=denoised_fn_cur,
                 model_kwargs=model_kwargs,
                 top_p=top_p,
                 mask=mask,
                 x_start=x_start
+
             )
             yield out
             sample_x = out["sample"]
 
-    @torch.no_grad()
+    #@torch.no_grad()
     def p_sample_loop(
         self,
         model,
@@ -410,7 +414,82 @@ class GaussianDiffusion():
         ):
             final.append(sample['sample'])
         return final
-    
+
+
+    def ddim_sample(self, model, x, t, t_prev, eta=0.0, clip_denoised=True, denoised_fn=None, model_kwargs=None):
+        """
+        One DDIM sampling step from x_t to x_{t_prev} (t_prev < t).
+        """
+        if model_kwargs is None:
+            model_kwargs = {}
+
+        model_output = model(x, self._scale_timesteps(t))
+        if self.predict_xstart:
+            x_start = model_output
+        else:
+            x_start = self._predict_xstart_from_eps(x, t, model_output)
+
+        if denoised_fn is not None:
+            x_start = denoised_fn(x_start, t)
+
+        if clip_denoised:
+            x_start = x_start.clamp(-1, 1)
+
+        alpha_t = self.extract(self.alphas_cumprod, t, x.shape)
+        alpha_prev = self.extract(self.alphas_cumprod, t_prev, x.shape)
+        sigma = eta * ((1 - alpha_prev) / (1 - alpha_t) * (1 - alpha_t / alpha_prev)).sqrt()
+
+        # Eq (12) in DDIM paper
+        dir_xt = (1 - alpha_prev - sigma**2).sqrt() * (x - alpha_t.sqrt() * x_start) / (1 - alpha_t).sqrt()
+        x_prev = alpha_prev.sqrt() * x_start + dir_xt + sigma * torch.randn_like(x)
+        return {"sample": x_prev, "pred_xstart": x_start}
+
+    def ddim_sample_loop(
+        self,
+        model,
+        shape,
+        time_steps=50,
+        eta=0.0,
+        noise=None,
+        clip_denoised=True,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+        denoised_fn=None,
+    ):
+        """
+        Run the DDIM sampling loop (deterministic if eta=0).
+        """
+        if device is None:
+            device = next(model.parameters()).device
+        if noise is None:
+            x = torch.randn(*shape, device=device)
+        else:
+            x = noise
+
+        # Create custom DDIM schedule (e.g., 50 uniform steps from total timesteps)
+        ddim_timesteps = torch.linspace(0, self.timesteps - 1, time_steps).long().flip(0)
+
+        for i in range(time_steps):
+            t = ddim_timesteps[i]
+            t_prev = ddim_timesteps[i + 1] if i + 1 < time_steps else torch.tensor(0).to(t.device)
+
+            t_batch = torch.full((shape[0],), t, device=device, dtype=torch.long)
+            t_prev_batch = torch.full((shape[0],), t_prev, device=device, dtype=torch.long)
+
+            out = self.ddim_sample(
+                model,
+                x,
+                t_batch,
+                t_prev_batch,
+                eta=eta,
+                clip_denoised=clip_denoised,
+                denoised_fn=denoised_fn,
+                model_kwargs=model_kwargs,
+            )
+            yield out
+            x = out["sample"]
+
     def _get_x_start(self, x_start_mean, std):
         '''
         Word embedding projection from {Emb(w)} to {x_0}
@@ -468,6 +547,17 @@ class GaussianDiffusion():
             decoder_nll = decoder_nll.mean(dim=-1) #[bsz]
 
         return decoder_nll# + lambda_validity * validity_penalty
+
+    def token_label_loss(self, model_output, get_labels, label_tokens):
+
+        logits = get_labels(model_output)  # bsz, seqlen, label_classes
+
+        loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+        loss = loss_fct(logits.view(-1, logits.size(-1)), #[seq_len*bs, label_classes]
+                               label_tokens.view(-1)).view(label_tokens.shape) #[bsz, seq_len]
+       
+        loss = loss.mean(dim=-1) #[bsz]
+        return loss
 
     @staticmethod
     def check_smiles_validity(token_ids, itos):
@@ -537,7 +627,22 @@ class GaussianDiffusion():
         #loss = loss.mean(dim=1)  # average per sample
         return loss  # shape: (batch,)
 
-    def training_losses_seq2seq(self, model, t, input_ids, corrupted_input_ids=None, tau=None, noise=None, boost_factor=0.0):
+    def bracket_imbalance_loss(self, x_t, get_logits):
+        logits = get_logits(x_t) #bs, seq_len, vocab_size
+        probs = torch.softmax(logits, dim=-1) #bs, seq_len, vocab_size
+
+        score = torch.zeros(probs.shape[-1], device=probs.device)
+        score[self.vocab['(']] = +1
+        score[self.vocab[')']] = -1
+
+        # Compute expected bracket contribution per position
+        imbalance = torch.matmul(probs, score)  # (B, L)
+
+        # Sum imbalance across positions and take absolute value
+        imbalance_loss = imbalance.sum(dim=-1).abs().mean()  # scalar
+        return imbalance_loss
+
+    def training_losses_seq2seq(self, model, t, input_ids, token_labels=None, corrupted_input_ids=None, noise=None):
         """
         Compute training losses for a single timestep.
 
@@ -554,33 +659,29 @@ class GaussianDiffusion():
         if corrupted_input_ids is not None:
             corrupted_input_ids_x = corrupted_input_ids.to(t.device)
 
+        if corrupted_input_ids is not None:
+            mix_ids = torch.where(t.reshape(-1,1)<400,corrupted_input_ids_x,input_ids_x)
+        else:
+            mix_ids = input_ids_x
 
         x_start_mean = model.get_embeds(input_ids_x) #[bs, seq_len, emb_dim]
-        if corrupted_input_ids is not None:
-            x_start_mean_corrupted = model.get_embeds(corrupted_input_ids_x)
+        mix_start_mean = model.get_embeds(mix_ids)
         
         std = self.extract(self.sqrt_one_minus_alphas_cumprod,
                                    torch.full((x_start_mean.shape[0],), 0, device=x_start_mean.device, dtype=torch.long),
                                    x_start_mean.shape)
 
         x_start = self._get_x_start(x_start_mean, std)
-        if corrupted_input_ids is not None:
-            x_start_corrupted = self._get_x_start(x_start_mean_corrupted, std)
+        mix_start = self._get_x_start(mix_start_mean, std)
 
         if noise is None:
             noise = torch.randn_like(x_start)
 
-        if corrupted_input_ids is None:
-            x_t = self.q_sample(x_start, t, noise=noise, mask=None) # reparametrization trick.
-        else:
-            corrupt_mask = (t>tau).view(-1, 1, 1)
-            #print(corrupt_mask.shape, x_start.shape, x_start_corrupted.shape)
-            x_start = torch.where(corrupt_mask, x_start, x_start_corrupted)
-            x_t = self.q_sample(x_start, t, noise=noise, mask=None) # reparametrization trick.
+        x_t = self.q_sample(mix_start, t, noise=noise, mask=None) # reparametrization trick.
 
         get_logits = model.get_logits
+        #get_labels = model.get_labels
         terms = {}
-        
 
         #attention_mask = self.create_attention_mask(input_ids, self.vocab, boost_factor).to(t.device)
         attention_mask = None
@@ -588,25 +689,22 @@ class GaussianDiffusion():
         model_output = model(x_t, self._scale_timesteps(t), mask=attention_mask)
 
         terms['mse'] = F.mse_loss(target, model_output, reduction='none').mean(dim=(1, 2))
-        #terms["mse"] = mean_flat((target - model_output) ** 2)
 
         model_out_x_start = self._x0_helper(model_output, x_t, t)['pred_xstart'] # predicted_xstart = model_output
         t0_mask = (t == 0)
-        #t0_loss = mean_flat((x_start_mean - model_out_x_start) ** 2)
         t0_loss = F.mse_loss(x_start_mean, model_out_x_start, reduction='none').mean(dim=(1,2))
         terms["mse"] = torch.where(t0_mask, t0_loss, terms["mse"])
 
         out_mean, _, _ = self.q_mean_variance(x_start, torch.full((x_start_mean.shape[0],), self.timesteps - 1, device=x_start_mean.device, dtype=torch.long))
         tT_loss =  torch.sqrt(mean_flat(out_mean ** 2))
 
-        if corrupted_input_ids is None:
-            decoder_nll = self._token_discrete_loss(x_start, get_logits, input_ids_x) # embedding regularization
-            terms["nll"] = self._token_discrete_loss(model_out_x_start, get_logits, input_ids_x, mask=None) # x_0->model_out_x_start
+        decoder_nll = self._token_discrete_loss(x_start, get_logits, input_ids_x) # embedding regularization
 
-            bracket_loss = self.bracket_depth_loss(x_t, get_logits, input_ids_x)
-            terms["loss"] = terms["mse"] + decoder_nll + tT_loss + 0.3*bracket_loss
-        else:
-            terms['loss'] = terms['mse']
+        #token_label_loss = self.token_label_loss(model_output, get_labels, token_labels.to(model_output.device))
+        imbalance_loss = self.bracket_imbalance_loss(model_output, get_logits)
+
+        #bracket_loss = self.bracket_depth_loss(x_t, get_logits, input_ids_x)
+        terms["loss"] = terms["mse"] + decoder_nll + tT_loss + 0.15*imbalance_loss
 
         return terms
 

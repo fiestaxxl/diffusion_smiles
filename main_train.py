@@ -9,47 +9,74 @@ import pickle
 
 from utils import encode
 
+import wandb
 
 with open("stoi.json", "r") as f:
     stoi = json.load(f)
 itos = {v:k for k,v in stoi.items()}
 
-timesteps = 2000
-
-#betas = get_named_beta_schedule('sqrt', timesteps)
-diffusion = GaussianDiffusion(timesteps,stoi, predict_xstart=True)
-diffusion.initialize('quadratic')
-
-emb_dim = 768
-dim_model = 1024
-time_dim = 1024
-num_heads = 4#8
-num_layers = 4#8
-dim_ff = 4096
-vocab_size = len(stoi)
-bs = 128
-
-device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-model = DiffusionTransformerDecoder(emb_dim, time_dim, dim_model, num_heads, dim_ff, num_layers, vocab_size, 
-                                    pad_idx = stoi['<pad>'], 
-                                    dropout=0.2).to(device)
-
-
-with open('../transformer_decoder/smiles.pickle', 'rb') as f:
+with open('data/smiles.pickle', 'rb') as f:
     smiles = pickle.load(f)
 
 max_len = len(smiles[-1])
 print(max_len)
 
+
+config = {
+    'timesteps': 2000,
+    'emb_dim': 768,
+    'dim_model': 1024,
+    'time_dim': 1024,
+    'num_heads': 4,#8
+    'num_layers': 4,#8
+    'dim_ff': 4096,
+    'dropout': 0.1,
+
+    'vocab_size': len(stoi),
+    'max_len': max_len,
+    'bs': 172,
+    'betas_shape': 'quadratic',
+
+    'corrupt': True,
+    'num_epochs': 25,
+    'lr': 5e-5,
+
+    
+}
+
+
+#betas = get_named_beta_schedule('sqrt', timesteps)
+diffusion = GaussianDiffusion(config['timesteps'],
+                                stoi, 
+                                predict_xstart=True)
+
+diffusion.initialize(config['betas_shape'])
+
+
+device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+model = DiffusionTransformerDecoder(emb_dim=config['emb_dim'], 
+                                    time_dim=config['time_dim'], 
+                                    dim_model=config['dim_model'], 
+                                    num_heads=config['num_heads'], 
+                                    dim_ff=config['dim_ff'], 
+                                    num_layers=config['num_layers'], 
+                                    vocab_size=config['vocab_size'], 
+                                    pad_idx = stoi['<pad>'], 
+                                    dropout=config['dropout']).to(device)
+
+
 corrupt = finetune = False
-dataset = SMILESDataset(smiles, encode, max_len, stoi, corrupt=corrupt)
-dataloader = DataLoader(dataset, batch_size = bs, shuffle=True)
+dataset = SMILESDataset(smiles, encode, max_len, stoi, corrupt=True)
+dataloader = DataLoader(dataset, batch_size = config['bs'], shuffle=True)
 
 #10 epochs for 4 layer
 #15 epochs for 12 layer
-num_epochs = 1
+num_epochs = config['num_epochs']
 max_iters = len(dataloader) * num_epochs
 
+config['max_iters'] = max_iters
+config['warmup'] = int(config['max_iters']*0.05)
 
 # checkpoint = torch.load('checkpoint_new.pth')
 # model.load_state_dict(checkpoint['model'])
@@ -57,18 +84,20 @@ max_iters = len(dataloader) * num_epochs
 loop = TrainLoop(model = model, 
                  diffusion = diffusion, 
                  dataloader = dataloader, 
-                 batch_size = bs, 
-                 lr = 5e-5, 
+                 batch_size = config['bs'], 
+                 lr = config['lr'], 
                  max_iters = max_iters, 
                  weight_decay=0, 
                  gradient_clipping=3,
-                 warmup=3500,
-                 finetune=finetune,
-                 
+                 warmup=config['warmup'],
                 #  use_scheduler=False,
                 #  opt_params=checkpoint['optimizer']
                  )
 
+wandb.init(
+    project = "DiffusionSmilesTransformer",
+    config = config,
+)
 
 loop.run_loop(num_epochs)
 

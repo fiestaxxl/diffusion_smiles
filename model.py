@@ -329,6 +329,10 @@ class DiffusionTransformerDecoder(nn.Module):
         self.lm_head = nn.Sequential(nn.Linear(emb_dim, emb_dim),
                                      nn.SiLU(),
                                      nn.Linear(emb_dim, vocab_size))
+
+        self.label_head = nn.Sequential(nn.Linear(emb_dim, emb_dim),
+                                     nn.SiLU(),
+                                     nn.Linear(emb_dim, 3)) 
         
     def forward(self, x, time, mask=None):
         # x [bs, seq_len, emb_dim]
@@ -357,5 +361,9 @@ class DiffusionTransformerDecoder(nn.Module):
     def get_logits(self, x):
         #x [bs, seq_len, emb_dim]
         return self.lm_head(x)
+
+    def get_labels(self, x):
+        #x [bs, seq_len, emb_dim]
+        return self.label_head(x)
 
 

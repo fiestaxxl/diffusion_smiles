@@ -2,7 +2,7 @@ import pandas as pd
 import re
 import json
 
-df = pd.read_csv('../transformer_decoder/250k_rndm_zinc_drugs_clean_3.csv')
+df = pd.read_csv('data/250k_rndm_zinc_drugs_clean_3.csv')
 
 smiles = df.smiles.to_list()
 smiles = list(map(lambda x: x[:-1], smiles))
