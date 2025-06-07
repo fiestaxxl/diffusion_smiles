@@ -43,23 +43,27 @@ if __name__=='__main__':
 
     path_checkpoint = args.path_checkpoint # 'checkpoints/checkpoint_90000.pth'
     checkpoint = torch.load(path_checkpoint, weights_only=False)
-    model.load_state_dict(checkpoint['model'])
+    model.load_state_dict(checkpoint['model'], strict=False)
     model.to(device)
     model.eval()
 
     generated_smiles = []
 
 
-    for i in tqdm(range(10)):
-        generated_embeddings = [model.get_logits(x["sample"]).softmax(dim=-1).argmax(dim=-1).cpu() for x in diffusion.p_sample_loop_progressive(model, (30, 109, emb_dim), time_steps=args.timesteps)]
-        smiles = [[decode(process_decode(x.cpu().tolist(), [stoi['<sos>'],stoi['<eos>'],stoi['<pad>']]), itos) for x in y] for y in generated_embeddings[-2:]]
-        generated_smiles.extend(smiles[-1])
+    for i in tqdm(range(1)):
+        generated_embeddings = [model.get_logits(x["sample"]).softmax(dim=-1).argmax(dim=-1).cpu() for x in diffusion.p_sample_loop_progressive(model, (3, 109, emb_dim), time_steps=args.timesteps)]
+        smiles = [[decode(x.cpu().tolist(), itos) for x in y] for y in generated_embeddings]
+        #smiles = [[decode(process_decode(x.cpu().tolist(), [stoi['<sos>'],stoi['<eos>'],stoi['<pad>']]), itos) for x in y] for y in generated_embeddings]
+        #smiles = [[decode(process_decode(x.cpu().tolist(), [stoi['<sos>'],stoi['<eos>'],stoi['<pad>']]), itos) for x in y] for y in generated_embeddings[-2:]]
+        #generated_smiles.extend(smiles[-1])
 
+    print(smiles)
 
     import pickle
 
     with open('smiles_generated.pickle', 'wb') as f:
-        pickle.dump(generated_smiles, f)
+        #pickle.dump(generated_smiles, f)
+        pickle.dump(smiles, f)
 
     with open('smiles_generated.pickle', 'rb') as f:
         gen = pickle.load(f)

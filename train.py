@@ -329,7 +329,7 @@ class TrainLoop:
             for batch in progress_bar:
                 if self.step % 1500 == 0 and self.step!=0:
                     generated_smiles = []
-                    for i in range(10):
+                    for i in range(1):
                         generated_embeddings = []
                         self.model.eval()
 

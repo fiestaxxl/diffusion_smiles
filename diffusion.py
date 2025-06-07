@@ -273,7 +273,7 @@ class GaussianDiffusion():
         """
 
         imbalance_loss = self.bracket_imbalance_loss(x, model.get_logits)
-        # --- BACKPROP to get gradient w.r.t. x ---
+        # # --- BACKPROP to get gradient w.r.t. x ---
         imbalance_loss.backward()
         grad = x.grad
 
@@ -292,8 +292,8 @@ class GaussianDiffusion():
             (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
         )  # no noise when t == 0
 
-        l = 1.0
-        l = l * (1 - (timesteps-t[0].item()) / timesteps)
+        l = 0.15
+        #l = l * (1 - (timesteps-t[0].item()) / timesteps)
 
         sample = out["mean"] + nonzero_mask * torch.exp(0.5 * out["log_variance"]) * noise - l * grad
         if mask == None:
@@ -704,7 +704,7 @@ class GaussianDiffusion():
         imbalance_loss = self.bracket_imbalance_loss(model_output, get_logits)
 
         #bracket_loss = self.bracket_depth_loss(x_t, get_logits, input_ids_x)
-        terms["loss"] = terms["mse"] + decoder_nll + tT_loss + 0.15*imbalance_loss
+        terms["loss"] = terms["mse"] + decoder_nll + tT_loss + 0.20*imbalance_loss
 
         return terms
 

@@ -23,12 +23,12 @@ print(max_len)
 
 
 config = {
-    'timesteps': 2000,
+    'timesteps': 6000,
     'emb_dim': 768,
     'dim_model': 1024,
     'time_dim': 1024,
-    'num_heads': 4,#8
-    'num_layers': 4,#8
+    'num_heads': 8,#8
+    'num_layers': 8,#8
     'dim_ff': 4096,
     'dropout': 0.1,
 
@@ -38,7 +38,7 @@ config = {
     'betas_shape': 'quadratic',
 
     'corrupt': True,
-    'num_epochs': 25,
+    'num_epochs': 50,
     'lr': 5e-5,
 
     

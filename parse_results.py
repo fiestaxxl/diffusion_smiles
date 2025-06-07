@@ -29,6 +29,7 @@ def parse_smiles_file(filepath):
         metrics = ast.literal_eval(metrics_match.group()) if metrics_match else {}
 
         # Extract SMILES lines under "ValidMols:"
+
         smiles = []
         if "ValidMols:" in block:
             smiles_block = block.split("ValidMols:")[1].strip()
@@ -40,6 +41,7 @@ def parse_smiles_file(filepath):
         #     "timesteps": timesteps,
         #     "smiles": smiles
         # })
+        
 
     return results
 
@@ -120,7 +122,7 @@ def plot_all_validity_curves_on_one_plot(results):
             validity = batch['metrics'].get('Validity', None)
             validities.append(validity*100)
 
-        if timesteps and validities:
+        if timesteps and validities and checkpoint*20:
             timesteps, validities = zip(*sorted(zip(timesteps, validities)))
             fig.add_trace(go.Scatter(
                 x=timesteps,
@@ -138,12 +140,13 @@ def plot_all_validity_curves_on_one_plot(results):
         height=600
     )
 
-    fig.show()
+    #fig.show()
 
     fig.write_image("validity_all_checkpoints.png", scale=2)
 
 
 def plot_all_metrics(results):
+    print('metrics')
 
     cols = 3
     rows = 1
@@ -179,34 +182,35 @@ def plot_all_metrics(results):
         # timesteps, lengths = zip(*sorted(zip(timesteps, lengths)))
         # timesteps, tokens = zip(*sorted(zip(timesteps, tokens)))
         
-        fig.add_trace(
-            go.Scatter(
-                x=timesteps,
-                y=complexities,
-                mode='lines+markers',
-                name=f'{checkpoint*20} training steps' 
-            ),
-            row=1, col=1
-        )
+        if checkpoint*20:
+            fig.add_trace(
+                go.Scatter(
+                    x=timesteps,
+                    y=complexities,
+                    mode='lines+markers',
+                    name=f'{checkpoint*20} training steps' 
+                ),
+                row=1, col=1
+            )
 
-        fig.add_trace(
-            go.Scatter(
-                x=timesteps,
-                y=lengths,
-                mode='lines+markers',
-                name=f'{checkpoint*20} training steps'
-            ),
-            row=1, col=2
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=timesteps,
-                y=tokens,
-                mode='lines+markers',
-                name=f'{checkpoint*20} training steps',
-            ),
-            row=1, col=3
-        )
+            fig.add_trace(
+                go.Scatter(
+                    x=timesteps,
+                    y=lengths,
+                    mode='lines+markers',
+                    name=f'{checkpoint*20} training steps'
+                ),
+                row=1, col=2
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=timesteps,
+                    y=tokens,
+                    mode='lines+markers',
+                    name=f'{checkpoint*20} training steps',
+                ),
+                row=1, col=3
+            )
 
 
     fig.update_layout(
@@ -219,22 +223,123 @@ def plot_all_metrics(results):
 
     fig.update_xaxes(title_text='Timestep')
 
-    fig.show()
+    #fig.show()
     fig.write_image("all_metrics.png", scale=2)
+
+
+import plotly.graph_objects as go
+
+def plot_all_validity_curves_on_one_plot_ext(results_list, checkpoints=None, names=None):
+    print('running validity')
+    fig = go.Figure()
+
+    for idx, results in enumerate(results_list):
+        for checkpoint, data in results.items():
+            print(checkpoint)
+            if checkpoints and checkpoint not in checkpoints:
+                print('skipped chkpt', checkpoint)
+                continue
+
+            timesteps = []
+            validities = []
+
+            for batch in data:
+                timestep = batch['timestep']
+                validity = batch['metrics'].get('Validity', None)
+                if validity is not None:
+                    timesteps.append(timestep)
+                    validities.append(validity * 100)
+
+            if timesteps and validities:
+                label = f'{names[idx]} - {checkpoint*20} steps'
+                dash_style = 'dash' if names[idx] == 'Classic' else 'solid'
+                timesteps, validities = zip(*sorted(zip(timesteps, validities)))
+                fig.add_trace(go.Scatter(
+                    x=timesteps,
+                    y=validities,
+                    mode='lines+markers',
+                    name=label,
+                    line=dict(dash=dash_style)
+                ))
+
+    fig.update_layout(
+        xaxis_title='Timestep',
+        yaxis_title='Validity, %',
+        template='plotly_white',
+        legend_title='Checkpoint (Training Steps)',
+        width=900,
+        height=600
+    )
+
+    #fig.show()
+    fig.write_image("validity_all_checkpoints.png", scale=2)
+
+
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
+
+def plot_all_metrics_ext(results_list, checkpoints=None, names=None):
+    print('running metrics')
+    cols = 3
+    rows = 1
+
+    fig = make_subplots(rows=rows, cols=cols,
+                        subplot_titles=['Complexity', 'Average SMILES Length', "Average Unique Tokens"])
+
+    for idx, results in enumerate(results_list):
+        for checkpoint, data in results.items():
+            if checkpoints and checkpoint not in checkpoints:
+                continue
+
+            timesteps = []
+            complexities = []
+            lengths = []
+            tokens = []
+
+            for batch in data:
+                timestep = batch['timestep']
+                smiles = batch['smiles']
+                len_smiles = len(smiles) + 1e-5
+
+                metrics = [smiles_complexity(smile) for smile in smiles]
+                complexity = sum([metric[0] for metric in metrics]) / len_smiles
+                smiles_len = sum([metric[1] for metric in metrics]) / len_smiles
+                unique_tokens = sum([metric[2] for metric in metrics]) / len_smiles
+
+                timesteps.append(timestep)
+                complexities.append(complexity)
+                lengths.append(smiles_len)
+                tokens.append(unique_tokens)
+
+            timesteps, complexities, lengths, tokens = zip(*sorted(zip(timesteps, complexities, lengths, tokens)))
+
+            label = f'{names[idx]} - {checkpoint*20} steps'
+            dash_style = 'dash' if names[idx] == 'Classic' else 'solid'
+            fig.add_trace(go.Scatter(x=timesteps, y=complexities, mode='lines+markers', name=label, line=dict(dash=dash_style)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=timesteps, y=lengths, mode='lines+markers', name=label, line=dict(dash=dash_style)), row=1, col=2)
+            fig.add_trace(go.Scatter(x=timesteps, y=tokens, mode='lines+markers', name=label, line=dict(dash=dash_style)), row=1, col=3)
+
+    fig.update_layout(
+        height=500 * rows,
+        width=550 * cols,
+        template='plotly_white',
+        legend_title='Checkpoints',
+    )
+    fig.update_xaxes(title_text='Timestep')
+
+    #fig.show()
+    fig.write_image("all_metrics.png", scale=2)
+
 #print(smiles_complexity('C'))
 
 if __name__=='__main__':
-    parsed_data = parse_smiles_file("outputs/all_results_4_layers.txt")
-    # Example usage
-    #plot_validity_subplots(parsed_data)
-    # print('calc validity')
-    plot_all_validity_curves_on_one_plot(parsed_data)
-    # print('calc metrics')
-    plot_all_metrics(parsed_data)
-    # print(parsed_data[10000])
+    parsed_data = parse_smiles_file("outputs/all_results_8_layers_6000_timesteps_imbalance.txt")
+    #print(parsed_data)
+    # plot_all_validity_curves_on_one_plot(parsed_data)
+    # plot_all_metrics(parsed_data)
 
-    print(smiles_complexity('C'))
-    print(smiles_complexity('CCCCCC'))
-    print(smiles_complexity('CFCClCCCBr'))
-    print(smiles_complexity('Cc1ccc(C(=O)N[C@@H]2CCC[C@H]2[NH+]2CC[C@@H]2Cc2c(Br)cc(I)cc2C)cc1'))
+    parsed_data_1 = parse_smiles_file("experiments/8_layers_6000_timesteps/all_results_8_layers_6000_timesteps.txt")
+    plot_all_validity_curves_on_one_plot_ext([parsed_data, parsed_data_1], checkpoints=[70000], names=['With imbalance', 'Classic'])
+    plot_all_metrics_ext([parsed_data, parsed_data_1], checkpoints=[70000], names=['With imbalance', "Classic"])
+
 
