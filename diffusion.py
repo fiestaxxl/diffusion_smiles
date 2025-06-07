@@ -295,7 +295,7 @@ class GaussianDiffusion():
         l = 0.15
         #l = l * (1 - (timesteps-t[0].item()) / timesteps)
 
-        sample = out["mean"] + nonzero_mask * torch.exp(0.5 * out["log_variance"]) * noise - l * grad
+        sample = out["mean"] + nonzero_mask * torch.exp(0.5 * out["log_variance"]) * noise# - l * grad
         if mask == None:
             pass
         else:
@@ -701,10 +701,10 @@ class GaussianDiffusion():
         decoder_nll = self._token_discrete_loss(x_start, get_logits, input_ids_x) # embedding regularization
 
         #token_label_loss = self.token_label_loss(model_output, get_labels, token_labels.to(model_output.device))
-        imbalance_loss = self.bracket_imbalance_loss(model_output, get_logits)
+        #imbalance_loss = self.bracket_imbalance_loss(model_output, get_logits)
 
         #bracket_loss = self.bracket_depth_loss(x_t, get_logits, input_ids_x)
-        terms["loss"] = terms["mse"] + decoder_nll + tT_loss + 0.20*imbalance_loss
+        terms["loss"] = terms["mse"] + decoder_nll + tT_loss# + 0.20*imbalance_loss
 
         return terms
 

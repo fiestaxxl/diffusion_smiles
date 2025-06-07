@@ -3,6 +3,10 @@ checkpoints
 *.pickle
 *.json
 *.log
+*.pdf
+*.png
+*.jpeg
+experiments
 wandb
 data
 outputs

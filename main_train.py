@@ -23,7 +23,7 @@ print(max_len)
 
 
 config = {
-    'timesteps': 6000,
+    'timesteps': 2000,
     'emb_dim': 768,
     'dim_model': 1024,
     'time_dim': 1024,
@@ -35,7 +35,7 @@ config = {
     'vocab_size': len(stoi),
     'max_len': max_len,
     'bs': 172,
-    'betas_shape': 'quadratic',
+    'betas_shape': 'cosine',#cosine, linear, sigmoid, quadratic
 
     'corrupt': True,
     'num_epochs': 50,
